@@ -45,11 +45,6 @@ Comprehensive system administration through your remote:
 - **System Shutdown** - Graceful system shutdown
 - **Beep Control** - Enable/disable system beep notifications
 
-#### **Maintenance Commands**
-- **Service Management** - Restart system services
-- **Cache Operations** - Clear system cache
-- **Database Optimization** - Optimize system database
-- **Log Management** - Clear system logs
 
 ### 📊 **Visual Status Display**
 
