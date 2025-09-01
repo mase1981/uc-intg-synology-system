@@ -8,6 +8,8 @@ Monitor and control your Synology NAS system directly from your Unfolded Circle 
 [![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg)](https://buymeacoffee.com/meirmiyara)
 [![PayPal](https://img.shields.io/badge/PayPal-donate-blue.svg)](https://paypal.me/mmiyara)
 
+**NOTE:** This integratation was built and tested against DSM 7.2.2 Update 4 and RS1221+. Doe to the large product line i cannot guarantee it work for everyone. Miles may vary.
+
 ## Features
 
 This integration provides comprehensive monitoring and control of your Synology NAS directly from your Unfolded Circle Remote, supporting a wide range of system management functions.
