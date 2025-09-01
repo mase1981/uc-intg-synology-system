@@ -199,8 +199,6 @@ Use the **Synology System Control** remote entity:
 
 1. **Safe Commands** (No confirmation required):
    - Beep On/Off
-   - Service restart
-   - Cache clear
 
 2. **Critical Commands** (Use with caution):
    - System restart
