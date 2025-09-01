@@ -1,0 +1,121 @@
+{
+  "driver_id": "uc_synology_system",
+  "version": "1.0.0",
+  "min_core_api": "1.0.0",
+  "port": 9090,
+  "name": {
+    "en": "Synology System Monitor"
+  },
+  "description": {
+    "en": "Monitor and control Synology NAS system status, services, and maintenance functions"
+  },
+  "icon": "uc:hard-drive",
+  "developer": {
+    "name": "Meir Miyara",
+    "email": "meir.miyara@gmail.com",
+    "url": "https://github.com/mase1981"
+  },
+  "home_page": "https://github.com/mase1981/uc-intg-synology-system",
+  "documentation": "https://github.com/mase1981/uc-intg-synology-system/blob/main/README.md",
+  "setup_data_schema": {
+    "title": {
+      "en": "Synology System Setup"
+    },
+    "settings": [
+      {
+        "id": "host",
+        "label": {
+          "en": "Synology NAS IP Address"
+        },
+        "field": {
+          "text": {
+            "value": ""
+          }
+        }
+      },
+      {
+        "id": "port",
+        "label": {
+          "en": "DSM Port"
+        },
+        "field": {
+          "number": {
+            "value": 5001,
+            "min": 1,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "username",
+        "label": {
+          "en": "Username"
+        },
+        "field": {
+          "text": {
+            "value": ""
+          }
+        }
+      },
+      {
+        "id": "password",
+        "label": {
+          "en": "Password"
+        },
+        "field": {
+          "password": {
+            "value": ""
+          }
+        }
+      },
+      {
+        "id": "use_https",
+        "label": {
+          "en": "Use HTTPS"
+        },
+        "field": {
+          "checkbox": {
+            "value": true
+          }
+        }
+      },
+      {
+        "id": "temperature_unit",
+        "label": {
+          "en": "Temperature Unit"
+        },
+        "field": {
+          "dropdown": {
+            "value": "celsius",
+            "items": [
+              {
+                "id": "celsius",
+                "label": {
+                  "en": "Celsius (°C)"
+                }
+              },
+              {
+                "id": "fahrenheit", 
+                "label": {
+                  "en": "Fahrenheit (°F)"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "otp_code",
+        "label": {
+          "en": "2FA Code (Optional)"
+        },
+        "field": {
+          "text": {
+            "value": ""
+          }
+        }
+      }
+    ]
+  },
+  "release_date": "2025-01-01"
+}

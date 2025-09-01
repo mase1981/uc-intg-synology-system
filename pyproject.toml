@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uc-intg-synology-system"
+version = "1.0.0"
+description = "Synology NAS system monitoring and control integration for Unfolded Circle Remote"
+authors = [
+    {name = "Meir Miyara", email = "meir.miyara@gmail.com"}
+]
+readme = "README.md"
+license = {text = "MPL-2.0"}
+requires-python = ">=3.11"
+keywords = ["synology", "nas", "unfolded circle", "remote", "integration", "monitoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL-2.0)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+    "ucapi>=0.3.1",
+    "synology-api>=0.8.0",
+    "aiohttp>=3.8.0",
+    "asyncio-mqtt>=0.11.0",
+    "certifi>=2023.7.22",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "pylint>=2.17.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mase1981/uc-intg-synology-system"
+Repository = "https://github.com/mase1981/uc-intg-synology-system"
+Issues = "https://github.com/mase1981/uc-intg-synology-system/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["uc_intg_synology_system*"]
+
+[tool.setuptools.package-data]
+"uc_intg_synology_system" = ["assets/icons/*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.pylint.messages_control]
+max-line-length = 120
