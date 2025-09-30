@@ -12,6 +12,8 @@ Monitor and control your Synology NAS system directly from your Unfolded Circle 
 [![Github Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-30363D?&logo=GitHub-Sponsors&logoColor=EA4AAA)](https://github.com/sponsors/mase1981/button)
 
 
+**NOTE:** This integratation was built and tested against DSM 7.2.2 Update 4 and RS1221+. Doe to the large product line i cannot guarantee it work for everyone. Miles may vary.
+
 ## Features
 
 This integration provides comprehensive monitoring and control of your Synology NAS directly from your Unfolded Circle Remote, supporting a wide range of system management functions.
@@ -201,8 +203,6 @@ Use the **Synology System Control** remote entity:
 
 1. **Safe Commands** (No confirmation required):
    - Beep On/Off
-   - Service restart
-   - Cache clear
 
 2. **Critical Commands** (Use with caution):
    - System restart
