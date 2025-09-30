@@ -3,10 +3,14 @@
 Monitor and control your Synology NAS system directly from your Unfolded Circle Remote 2 or Remote 3.
 
 ![Synology](https://img.shields.io/badge/Synology-DSM%207.x-orange)
-![Version](https://img.shields.io/badge/version-1.0.0-green)
+[![Discord](https://badgen.net/discord/online-members/zGVYf58)](https://discord.gg/zGVYf58)
+![GitHub Release](https://img.shields.io/github/v/release/mase1981/uc-intg-synology-system)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/mase1981/uc-intg-synology-system/total)
 ![License](https://img.shields.io/badge/license-MPL--2.0-blue)
 [![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg)](https://buymeacoffee.com/meirmiyara)
 [![PayPal](https://img.shields.io/badge/PayPal-donate-blue.svg)](https://paypal.me/mmiyara)
+[![Github Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-30363D?&logo=GitHub-Sponsors&logoColor=EA4AAA)](https://github.com/sponsors/mase1981/button)
+
 
 ## Features
 
