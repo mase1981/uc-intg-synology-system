@@ -1,10 +1,14 @@
 # .github/workflows/build.yml
 
-# Manual triggered GitHub action to build a distribution binary of the Python integration driver and attach it to a release draft including a hash file
+# Build a distribution binary of the Python integration driver and attach it to a release draft including a hash file.
+# Triggered by pushing a version tag (v*), or manually.
 ---
 name: "Build & Draft Release"
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 env:
