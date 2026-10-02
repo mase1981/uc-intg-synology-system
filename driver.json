@@ -1,6 +1,6 @@
 {
   "driver_id": "uc_synology_system",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "min_core_api": "1.0.0",
   "port": 9090,
   "name": {

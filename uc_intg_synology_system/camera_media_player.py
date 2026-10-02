@@ -68,7 +68,7 @@ class SynologyCameraMonitor:
             return {}
         
         try:
-            cameras_data = self._client._surveillance.camera_list()
+            cameras_data = await asyncio.to_thread(self._client._surveillance.camera_list)
             
             if not cameras_data or not cameras_data.get('success', False):
                 _LOG.warning("Camera list API call unsuccessful")
@@ -154,7 +154,7 @@ class SynologyCameraMonitor:
             
             if hasattr(self._client._surveillance, 'get_snapshot'):
                 try:
-                    snapshot_data = self._client._surveillance.get_snapshot(camera_id)
+                    snapshot_data = await asyncio.to_thread(self._client._surveillance.get_snapshot, camera_id)
                     
                     if isinstance(snapshot_data, bytes) and len(snapshot_data) > 100:
                         base64_data = base64.b64encode(snapshot_data).decode('utf-8')
@@ -377,7 +377,7 @@ class SynologyCameraMonitor:
             return
         
         try:
-            cameras_data = self._client._surveillance.camera_list()
+            cameras_data = await asyncio.to_thread(self._client._surveillance.camera_list)
             
             if cameras_data and cameras_data.get('success', False):
                 cameras_raw = safe_get_nested_value(cameras_data, ['data', 'cameras'], [])

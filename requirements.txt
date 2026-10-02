@@ -1,6 +1,5 @@
 # Core Dependencies - EXACT VERSIONS REQUIRED
-ucapi==0.5.1
-websockets==14.1
+ucapi>=0.7.0
 
 # Synology API and supporting libraries
 synology-api>=0.8.0

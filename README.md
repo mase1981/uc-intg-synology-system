@@ -56,6 +56,12 @@ Transform your remote into a powerful NAS monitoring dashboard with real-time vi
 - **Package Manager** - Installed packages and updates
 - **User Sessions** - Active user sessions and connections
 
+### 📈 **Sensors**
+- **CPU Usage, Memory Usage, Storage Used** - Percentages for Remote pages and activities
+- **Temperature** - Converted to °C or °F automatically by the Remote
+- **Uptime, Status, DSM Version** - Text sensors
+- Updated by the background monitor (every 30 seconds; storage every 5 minutes)
+
 ### 🎮 **System Control Commands**
 
 Comprehensive system administration through your remote:

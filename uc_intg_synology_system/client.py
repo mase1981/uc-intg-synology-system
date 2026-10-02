@@ -70,7 +70,8 @@ class SynologySystemClient:
         try:
             _LOG.info(f"Connecting to Synology NAS at {self._host}:{self._port}")
 
-            self._sys_info = core_sys_info.SysInfo(
+            self._sys_info = await asyncio.to_thread(
+                core_sys_info.SysInfo,
                 ip_address=self._host,
                 port=self._port,
                 username=self._username,
@@ -81,7 +82,7 @@ class SynologySystemClient:
             )
 
             # Test connection with a basic API call
-            test_response = self._sys_info.get_system_info()
+            test_response = await asyncio.to_thread(self._sys_info.get_system_info)
             if test_response and test_response.get('success'):
                 self._connected = True
                 self._initial_connection_made = True
@@ -106,7 +107,7 @@ class SynologySystemClient:
     async def _detect_available_packages(self) -> None:
         """Detect available packages from the API."""
         try:
-            services_response = self._sys_info.services_status()
+            services_response = await asyncio.to_thread(self._sys_info.services_status)
             if services_response and services_response.get('success'):
                 services = services_response.get('data', {}).get('service', [])
 
@@ -142,7 +143,7 @@ class SynologySystemClient:
         """Disconnect from the Synology NAS."""
         if self._sys_info:
             try:
-                self._sys_info.logout()
+                await asyncio.to_thread(self._sys_info.logout)
             except:
                 pass  # Ignore logout errors
         self._connected = False
@@ -155,8 +156,8 @@ class SynologySystemClient:
             if initial_fetch:
                 await asyncio.sleep(1)
 
-            info_raw = self._sys_info.get_system_info()
-            util_raw = self._sys_info.get_all_system_utilization()
+            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
+            util_raw = await asyncio.to_thread(self._sys_info.get_all_system_utilization)
 
             cpu_load = safe_get_nested_value(util_raw, ['cpu', 'user_load'], 0)
             mem_usage = safe_get_nested_value(util_raw, ['memory', 'real_usage'], 0)
@@ -170,6 +171,7 @@ class SynologySystemClient:
                 "cpu_usage": float(cpu_load),
                 "memory_usage": float(mem_usage),
                 "temperature": format_temperature(temp_c, self._temperature_unit),
+                "temperature_c": temp_c,
                 "uptime": format_uptime(parse_uptime_string(uptime_str)),
             }
         except Exception as ex:
@@ -180,7 +182,7 @@ class SynologySystemClient:
         """Get storage status information."""
         if not self._connected: return {}
         try:
-            storage_raw = self._sys_info.storage()
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
             total_size = sum(int(vol.get('size', {}).get('total', '0')) for vol in volumes)
             total_used = sum(int(vol.get('size', {}).get('used', '0')) for vol in volumes)
@@ -195,10 +197,10 @@ class SynologySystemClient:
             return {"status": "unavailable", "interfaces": 0, "total_rx": 0, "total_tx": 0}
 
         try:
-            net_raw = self._sys_info.get_network_info()
+            net_raw = await asyncio.to_thread(self._sys_info.get_network_info)
             interfaces = safe_get_nested_value(net_raw, ['data', 'nif'], [])
             
-            util_raw = self._sys_info.get_all_system_utilization()
+            util_raw = await asyncio.to_thread(self._sys_info.get_all_system_utilization)
             network_data = util_raw.get('network', [])
             _LOG.debug(f"Network data found: {network_data}")
             
@@ -236,7 +238,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "running_count": 0, "total_count": 0}
 
         try:
-            services_raw = self._sys_info.services_status()
+            services_raw = await asyncio.to_thread(self._sys_info.services_status)
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
 
             if not service_list:
@@ -299,7 +301,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "camera_count": 0, "recording_count": 0}
 
         try:
-            services_raw = self._sys_info.services_status()
+            services_raw = await asyncio.to_thread(self._sys_info.services_status)
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             
             surveillance_services = [s for s in service_list if 'surveillance' in s.get('service_id', '').lower()]
@@ -316,7 +318,8 @@ class SynologySystemClient:
             if not self._surveillance:
                 try:
                     from synology_api.surveillancestation import SurveillanceStation
-                    self._surveillance = SurveillanceStation(
+                    self._surveillance = await asyncio.to_thread(
+                        SurveillanceStation,
                         ip_address=self._host,
                         port=self._port,
                         username=self._username,
@@ -334,7 +337,7 @@ class SynologySystemClient:
                         "error": str(surv_ex)
                     }
 
-            camera_data = self._surveillance.camera_list()
+            camera_data = await asyncio.to_thread(self._surveillance.camera_list)
             
             if camera_data and camera_data.get('success'):
                 cameras = camera_data.get('data', {}).get('cameras', [])
@@ -377,7 +380,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "system_temp": 0, "cpu_temp": 0, "temperature_formatted": "N/A"}
 
         try:
-            info_raw = self._sys_info.get_system_info()
+            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
             temp_c = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
 
             fan_mode = "full_speed"  # Default for enterprise NAS models
@@ -425,7 +428,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "cache_enabled": False, "cache_usage": 0}
 
         try:
-            storage_raw = self._sys_info.storage()
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
 
             ssd_caches = safe_get_nested_value(storage_raw, ['data', 'ssdCaches'], [])
             shared_caches = safe_get_nested_value(storage_raw, ['data', 'sharedCaches'], [])
@@ -503,7 +506,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "raid_level": "unknown", "degraded_drives": 0}
 
         try:
-            storage_raw = self._sys_info.storage()
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
             storage_pools = safe_get_nested_value(storage_raw, ['data', 'storagePools'], [])
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
@@ -571,7 +574,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "volume_count": 0, "healthy_volumes": 0}
 
         try:
-            storage_raw = self._sys_info.storage()
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
 
             volume_count = len(volumes)
@@ -627,11 +630,11 @@ class SynologySystemClient:
             return {"status": "unavailable", "ups_connected": False, "battery_level": 0, "ups_model": "Unknown"}
 
         try:
-            info_raw = self._sys_info.get_system_info()
+            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
             ups_info = safe_get_nested_value(info_raw, ['data', 'ups_info'], {})
             ext_power_status = safe_get_nested_value(info_raw, ['data', 'ext_power_status'], 0)
 
-            services_raw = self._sys_info.services_status()
+            services_raw = await asyncio.to_thread(self._sys_info.services_status)
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             ups_services = [s for s in service_list if 'ups' in s.get('service_id', '').lower()]
             ups_service_enabled = any(s.get('enable_status') == 'enabled' for s in ups_services)
@@ -690,8 +693,8 @@ class SynologySystemClient:
             return {"status": "unavailable", "cpu_temp": 0, "monitored_drives": 0}
 
         try:
-            info_raw = self._sys_info.get_system_info()
-            storage_raw = self._sys_info.storage()
+            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
 
             cpu_temp = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
@@ -721,7 +724,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "total_drives": 0, "healthy_drives": 0}
 
         try:
-            storage_raw = self._sys_info.storage()
+            storage_raw = await asyncio.to_thread(self._sys_info.storage)
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
 
             total_drives = len(disks)
@@ -759,7 +762,7 @@ class SynologySystemClient:
             }
 
         try:
-            info_raw = self._sys_info.get_system_info()
+            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
             sys_temp = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
             model = safe_get_nested_value(info_raw, ['data', 'model'], 'Unknown')
             version_string = safe_get_nested_value(info_raw, ['data', 'version_string'], 'Unknown')
@@ -767,7 +770,7 @@ class SynologySystemClient:
             ups_info = safe_get_nested_value(info_raw, ['data', 'ups_info'], {})
             ext_power_status = safe_get_nested_value(info_raw, ['data', 'ext_power_status'], 0)
 
-            services_raw = self._sys_info.services_status()
+            services_raw = await asyncio.to_thread(self._sys_info.services_status)
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             ups_services = [s for s in service_list if 'ups' in s.get('service_id', '').lower()]
             ups_service_enabled = any(s.get('enable_status') in ['enabled', 'static'] for s in ups_services)
@@ -822,7 +825,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "error": "Not connected to NAS"}
 
         try:
-            storage_response = self._sys_info.storage()
+            storage_response = await asyncio.to_thread(self._sys_info.storage)
 
             if not storage_response or not storage_response.get('success'):
                 _LOG.error("storage() API call failed")
@@ -946,7 +949,7 @@ class SynologySystemClient:
 
             try:
                 if hasattr(self._sys_info, '_request_data'):
-                    packages_raw = self._sys_info._request_data("SYNO.Core.Package", "list", {"additional": "status"})
+                    packages_raw = await asyncio.to_thread(self._sys_info._request_data, "SYNO.Core.Package", "list", {"additional": "status"})
             except Exception:
                 pass
 

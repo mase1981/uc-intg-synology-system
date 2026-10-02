@@ -5,6 +5,7 @@ Remote entity for Synology System control commands
 :license: MPL-2.0, see LICENSE for more details.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -104,22 +105,22 @@ class SynologySystemRemote:
         try:
             if command == "BEEP_ON":
                 _LOG.info("Activating NAS beep")
-                self._client._sys_info.enable_beep_control(True)
+                await asyncio.to_thread(self._client._sys_info.enable_beep_control, True)
                 return True
                 
             elif command == "BEEP_OFF":
                 _LOG.info("Deactivating NAS beep")
-                self._client._sys_info.enable_beep_control(False)
+                await asyncio.to_thread(self._client._sys_info.enable_beep_control, False)
                 return True
                 
             elif command == "SYSTEM_RESTART":
                 _LOG.warning("SYSTEM RESTART REQUESTED - This will reboot your NAS!")
-                self._client._sys_info.reboot()
+                await asyncio.to_thread(self._client._sys_info.reboot)
                 return True
                 
             elif command == "SYSTEM_SHUTDOWN":
                 _LOG.warning("SYSTEM SHUTDOWN REQUESTED - This will shutdown your NAS!")
-                self._client._sys_info.shutdown()
+                await asyncio.to_thread(self._client._sys_info.shutdown)
                 return True
                 
             else:
