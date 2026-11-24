@@ -1,5 +1,5 @@
 """
-Configuration management for Synology System integration.
+Configuration for the Synology System integration.
 
 :copyright: (c) 2024 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
@@ -8,232 +8,78 @@ Configuration management for Synology System integration.
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict
 
-from uc_intg_synology_system.helpers import SynologyConstants, validate_ip_address, validate_port
+from ucapi_framework import BaseConfigManager
+
+from uc_intg_synology_system.helpers import SynologyConstants
 
 _LOG = logging.getLogger(__name__)
 
+DEVICE_ID = "synology_system"
 
+_DEFAULT_FEATURES = {
+    "docker_monitoring": True,
+    "security_monitoring": True,
+    "network_monitoring": True,
+    "storage_monitoring": True,
+    "ups_monitoring": True,
+    "surveillance_monitoring": False,
+    "enhanced_monitoring": True,
+}
+
+
+def _default_features() -> Dict[str, bool]:
+    return dict(_DEFAULT_FEATURES)
+
+
+def _default_polling() -> Dict[str, int]:
+    return dict(SynologyConstants.DEFAULT_POLLING)
+
+
+@dataclass
 class SynologyConfig:
-    """Configuration management for Synology integration."""
+    """Synology NAS connection settings. New fields must always have defaults."""
 
-    def __init__(self, config_file: Optional[str] = None):
-        """
-        Initialize configuration manager.
-        
-        :param config_file: Path to configuration file
-        """
-        self._config_file = config_file or "config.json"
-        self._config_data = {}
-        self._load_config()
-
-    def _load_config(self) -> None:
-        """Load configuration from file."""
-        try:
-            if os.path.exists(self._config_file):
-                with open(self._config_file, 'r', encoding='utf-8') as file:
-                    self._config_data = json.load(file)
-                    _LOG.info(f"Configuration loaded from {self._config_file}")
-            else:
-                _LOG.info(f"Configuration file {self._config_file} not found, using defaults")
-                self._create_default_config()
-        except Exception as ex:
-            _LOG.error(f"Error loading configuration: {ex}")
-            self._create_default_config()
-
-    def _create_default_config(self) -> None:
-        """Create default configuration structure."""
-        self._config_data = {
-            "synology_config": {
-                "host": "",
-                "port": 5001,
-                "username": "",
-                "password": "",
-                "use_https": True,
-                "temperature_unit": "celsius",
-                "otp_enabled": False,
-                "dsm_version": 7,
-                "polling_intervals": SynologyConstants.DEFAULT_POLLING.copy(),
-                "enabled_features": {
-                    "docker_monitoring": True,
-                    "security_monitoring": True,
-                    "network_monitoring": True,
-                    "storage_monitoring": True,
-                    "ups_monitoring": True,
-                    "surveillance_monitoring": False,
-                    "enhanced_monitoring": True  # Enable all enhanced features
-                },
-                "available_packages": {}
-            }
-        }
-
-    def save_config(self) -> bool:
-        """Save configuration to file."""
-        try:
-            config_path = Path(self._config_file)
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(self._config_file, 'w', encoding='utf-8') as file:
-                json.dump(self._config_data, file, indent=2, ensure_ascii=False)
-            
-            _LOG.info(f"Configuration saved to {self._config_file}")
-            return True
-        except Exception as ex:
-            _LOG.error(f"Error saving configuration: {ex}")
-            return False
-
-    def update_from_setup_data(self, setup_data: Dict[str, Any]) -> bool:
-        """
-        Update configuration from setup data.
-        
-        :param setup_data: Setup data from Remote Two/3
-        :return: True if configuration was updated successfully
-        """
-        try:
-            synology_config = self._config_data.get("synology_config", {})
-            
-            required_fields = ["host", "port", "username", "password"]
-            for field in required_fields:
-                if field not in setup_data or not setup_data[field]:
-                    _LOG.error(f"Missing required field: {field}")
-                    return False
-            
-            if not validate_ip_address(setup_data["host"]):
-                _LOG.error(f"Invalid IP address: {setup_data['host']}")
-                return False
-            
-            if not validate_port(int(setup_data["port"])):
-                _LOG.error(f"Invalid port: {setup_data['port']}")
-                return False
-            
-            synology_config.update({
-                "host": setup_data["host"].strip(),
-                "port": int(setup_data["port"]),
-                "username": setup_data["username"].strip(),
-                "password": setup_data["password"],
-                "use_https": setup_data.get("use_https", True),
-                "temperature_unit": setup_data.get("temperature_unit", "celsius").lower(),
-                "otp_enabled": bool(setup_data.get("otp_code", "").strip())
-            })
-            
-            self._config_data["synology_config"] = synology_config
-            _LOG.info("Configuration updated from setup data")
-            return self.save_config()
-            
-        except Exception as ex:
-            _LOG.error(f"Error updating configuration from setup data: {ex}")
-            return False
-
-    def update_available_packages(self, packages: Dict[str, Any]) -> None:
-        """
-        Update available packages information.
-        
-        :param packages: Dictionary of available packages
-        """
-        try:
-            synology_config = self._config_data.get("synology_config", {})
-            synology_config["available_packages"] = packages
-            
-            enabled_features = synology_config.get("enabled_features", {})
-            
-            if "Docker" in packages:
-                enabled_features["docker_monitoring"] = True
-                _LOG.info("Docker package detected - enabling Docker monitoring")
-            if "SurveillanceStation" in packages:
-                enabled_features["surveillance_monitoring"] = True
-                _LOG.info("Surveillance Station detected - enabling surveillance monitoring")
-            
-            synology_config["enabled_features"] = enabled_features
-            self._config_data["synology_config"] = synology_config
-            
-            _LOG.info(f"Updated available packages: {list(packages.keys())}")
-            self.save_config()
-            
-        except Exception as ex:
-            _LOG.error(f"Error updating available packages: {ex}")
+    identifier: str = DEVICE_ID
+    name: str = "Synology System"
+    host: str = ""
+    port: int = 5001
+    username: str = ""
+    password: str = ""
+    use_https: bool = True
+    temperature_unit: str = "celsius"
+    dsm_version: int = 7
+    device_token: str = ""
+    available_packages: Dict[str, Any] = field(default_factory=dict)
+    enabled_features: Dict[str, bool] = field(default_factory=_default_features)
+    polling_intervals: Dict[str, int] = field(default_factory=_default_polling)
 
     def is_configured(self) -> bool:
-        """Check if basic configuration is complete."""
-        synology_config = self._config_data.get("synology_config", {})
-        required_fields = ["host", "port", "username", "password"]
-        
-        for field in required_fields:
-            if not synology_config.get(field):
-                return False
-        
-        return True
-
-    def get_connection_params(self) -> Dict[str, Any]:
-        synology_config = self._config_data.get("synology_config", {})
-        return {
-            "host": synology_config.get("host", ""),
-            "port": synology_config.get("port", 5001),
-            "username": synology_config.get("username", ""),
-            "password": synology_config.get("password", ""),
-            "secure": synology_config.get("use_https", True),
-            "dsm_version": synology_config.get("dsm_version", 7),
-            "otp_code": None  # CRITICAL: Never store OTP codes
-        }
-
-    @property
-    def host(self) -> str:
-        return self._config_data.get("synology_config", {}).get("host", "")
-
-    @property
-    def port(self) -> int:
-        return self._config_data.get("synology_config", {}).get("port", 5001)
-
-    @property
-    def username(self) -> str:
-        return self._config_data.get("synology_config", {}).get("username", "")
-
-    @property
-    def use_https(self) -> bool:
-        return self._config_data.get("synology_config", {}).get("use_https", True)
-
-    @property
-    def temperature_unit(self) -> str:
-        return self._config_data.get("synology_config", {}).get("temperature_unit", "celsius")
-
-    @property
-    def polling_intervals(self) -> Dict[str, int]:
-        return self._config_data.get("synology_config", {}).get("polling_intervals", SynologyConstants.DEFAULT_POLLING)
-
-    @property
-    def enabled_features(self) -> Dict[str, bool]:
-        return self._config_data.get("synology_config", {}).get("enabled_features", {})
-
-    @property
-    def available_packages(self) -> Dict[str, Any]:
-        return self._config_data.get("synology_config", {}).get("available_packages", {})
+        return bool(self.host and self.port and self.username and self.password)
 
     def get_enabled_sources(self) -> Dict[str, str]:
-        """Get enabled sources for the monitoring dashboard."""
+        """Sources offered by the monitoring dashboard media player."""
         sources = {
-            # Core system monitoring (always available)
             "SYSTEM_OVERVIEW": "System Overview",
-            "STORAGE_STATUS": "Storage Status"
+            "STORAGE_STATUS": "Storage Status",
         }
-        
-        enabled_features = self.enabled_features
-        available_packages = self.available_packages
-        
-        # Add network and security if enabled
-        if enabled_features.get("network_monitoring", True):
+
+        features = self.enabled_features
+        packages = self.available_packages
+
+        if features.get("network_monitoring", True):
             sources["NETWORK_STATS"] = "Network Statistics"
-        if enabled_features.get("security_monitoring", True):
+        if features.get("security_monitoring", True):
             sources["SECURITY_STATUS"] = "Security Status"
-        
-        # Always add services status
+
         sources["SERVICES_STATUS"] = "Services Status"
-        
-        # Enhanced monitoring sources (always available for complete monitoring)
-        if enabled_features.get("enhanced_monitoring", True):
+
+        if features.get("enhanced_monitoring", True):
             sources.update({
                 "THERMAL_STATUS": "Temperature Monitor",
-                "CACHE_STATUS": "SSD Cache", 
+                "CACHE_STATUS": "SSD Cache",
                 "RAID_STATUS": "RAID Health",
                 "VOLUME_STATUS": "Volume Usage",
                 "UPS_STATUS": "UPS Monitor",
@@ -242,30 +88,85 @@ class SynologyConfig:
                 "POWER_MANAGEMENT": "Power Management",
                 "CACHE_PERFORMANCE": "Cache Performance",
                 "PACKAGE_MANAGER": "Package Manager",
-                "USER_SESSIONS": "User Sessions"  # CRITICAL: Ensure this is included
+                "USER_SESSIONS": "User Sessions",
             })
 
-        if enabled_features.get("surveillance_monitoring", True) and "SurveillanceStation" in available_packages:
+        if features.get("surveillance_monitoring", True) and "SurveillanceStation" in packages:
             sources["SURVEILLANCE_STATUS"] = "Surveillance Station"
-            
-        # Package-dependent sources
-        if enabled_features.get("docker_monitoring", True) and "Docker" in available_packages:
+
+        if features.get("docker_monitoring", True) and "Docker" in packages:
             sources["DOCKER_STATUS"] = "Docker Containers"
-        
-        if enabled_features.get("surveillance_monitoring", True) and "SurveillanceStation" in available_packages:
-            sources["SURVEILLANCE_STATUS"] = "Surveillance Station"
-        
-        _LOG.info(f"Final enabled sources ({len(sources)}): {list(sources.values())}")
+
         return sources
 
-    def update_polling_interval(self, source: str, interval: int) -> bool:
+
+class SynologyConfigManager(BaseConfigManager[SynologyConfig]):
+    """Stores the Synology device configuration."""
+
+
+def _as_bool(value: Any, default: bool = True) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    if value is None:
+        return default
+    return bool(value)
+
+
+def migrate_legacy_config(config_dir: str) -> bool:
+    """Convert the pre-1.2.0 ``{"synology_config": {...}}`` file to the framework format.
+
+    Idempotent: a file that is already a list of devices is left untouched.
+    The original is kept as ``config.json.legacy`` the first time it is converted.
+    """
+    config_file = os.path.join(config_dir, "config.json")
+    if not os.path.exists(config_file):
+        return False
+
+    try:
+        with open(config_file, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as err:
+        _LOG.error("Cannot read %s for migration: %s", config_file, err)
+        return False
+
+    if not isinstance(data, dict) or "synology_config" not in data:
+        return False
+
+    legacy = data.get("synology_config") or {}
+    devices = []
+    if legacy.get("host") and legacy.get("username") and legacy.get("password"):
         try:
-            synology_config = self._config_data.get("synology_config", {})
-            polling_intervals = synology_config.get("polling_intervals", {})
-            polling_intervals[source] = interval
-            synology_config["polling_intervals"] = polling_intervals
-            self._config_data["synology_config"] = synology_config
-            return self.save_config()
-        except Exception as ex:
-            _LOG.error(f"Error updating polling interval: {ex}")
-            return False
+            port = int(legacy.get("port", 5001))
+        except (TypeError, ValueError):
+            port = 5001
+        device = SynologyConfig(
+            host=str(legacy.get("host", "")).strip(),
+            port=port,
+            username=str(legacy.get("username", "")).strip(),
+            password=str(legacy.get("password", "")),
+            use_https=_as_bool(legacy.get("use_https"), True),
+            temperature_unit=str(legacy.get("temperature_unit", "celsius")).lower(),
+            dsm_version=int(legacy.get("dsm_version", 7) or 7),
+            available_packages=dict(legacy.get("available_packages") or {}),
+            enabled_features={**_DEFAULT_FEATURES, **(legacy.get("enabled_features") or {})},
+            polling_intervals={**SynologyConstants.DEFAULT_POLLING, **(legacy.get("polling_intervals") or {})},
+        )
+        devices.append(device.__dict__)
+
+    backup_file = config_file + ".legacy"
+    temp_file = config_file + ".tmp"
+    try:
+        if not os.path.exists(backup_file):
+            with open(backup_file, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        with open(temp_file, "w", encoding="utf-8") as handle:
+            json.dump(devices, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_file, config_file)
+    except OSError as err:
+        _LOG.error("Cannot write migrated configuration: %s", err)
+        return False
+
+    _LOG.info("Migrated legacy configuration (%d device)", len(devices))
+    return True

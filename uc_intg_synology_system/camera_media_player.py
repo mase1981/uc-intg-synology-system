@@ -10,19 +10,22 @@ import base64
 import logging
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-import ucapi
 from ucapi import StatusCodes
-from ucapi.media_player import Attributes, Commands, Features, MediaPlayer, States
+from ucapi.media_player import Attributes, Commands, Features, States
+from ucapi_framework import MediaPlayerEntity
 
-from uc_intg_synology_system.client import SynologySystemClient
 from uc_intg_synology_system.config import SynologyConfig
+from uc_intg_synology_system.device import SynologyDevice
 from uc_intg_synology_system.helpers import create_two_line_display, safe_get_nested_value
 
 _LOG = logging.getLogger(__name__)
 
-# CRITICAL: Commands to suppress to prevent red error messages
+REFRESH_INTERVAL = 20
+DISCOVERY_RETRY = 60
+
+# Commands to suppress to prevent red error messages
 SUPPRESSED_COMMANDS = [
     Commands.PLAY_PAUSE,
     Commands.STOP,
@@ -40,26 +43,111 @@ SUPPRESSED_COMMANDS = [
 ]
 
 
-class SynologyCameraMonitor:
-    """Synology camera monitoring using HOME ASSISTANT exact method."""
+class SynologyCameraMonitor(MediaPlayerEntity):
+    """Synology Surveillance Station camera monitor."""
 
-    def __init__(self, api: ucapi.IntegrationAPI, client: SynologySystemClient, config: SynologyConfig):
-        """Initialize camera monitor."""
-        self._api = api
-        self._client = client
+    def __init__(self, config: SynologyConfig, device: SynologyDevice):
+        self._device = device
         self._config = config
         self._current_camera = "All Cameras"
         self._cameras = {}
         self._camera_id_to_name = {}
-        self._polling_task = None
         self._icon_cache = {}
         self._snapshot_cache = {}
-        
+        self._powered = True
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._last_refresh = 0.0
+        self._last_discovery = 0.0
+        self._view: Dict[str, Any] = {
+            Attributes.MEDIA_TITLE: "Synology Camera Monitor",
+            Attributes.MEDIA_ARTIST: "Discovering cameras...",
+            Attributes.MEDIA_IMAGE_URL: self._get_camera_icon_base64("surveillance_status.png"),
+        }
+
         self.snapshot_quality = "MEDIUM"
-        
-        _LOG.info("Initializing camera monitor with HOME ASSISTANT method")
-        
-        self._entity = self._create_camera_media_player()
+
+        features = [
+            Features.ON_OFF,
+            Features.SELECT_SOURCE,
+            Features.VOLUME_UP_DOWN,
+            Features.MEDIA_TITLE,
+            Features.MEDIA_ARTIST,
+            Features.MEDIA_IMAGE_URL,
+        ]
+        super().__init__(
+            "synology_camera_monitor",
+            "Synology Camera Monitor",
+            features,
+            {
+                Attributes.STATE: States.UNKNOWN,
+                Attributes.SOURCE: "",
+                Attributes.SOURCE_LIST: [],
+                Attributes.MEDIA_TITLE: "",
+                Attributes.MEDIA_ARTIST: "",
+                Attributes.MEDIA_IMAGE_URL: "",
+                Attributes.VOLUME: 0,
+            },
+            cmd_handler=self.handle_command,
+        )
+        self.subscribe_to_device(device)
+
+    @property
+    def _client(self):
+        return self._device.client
+
+    async def sync_state(self) -> None:
+        if self._device.state == "UNAVAILABLE":
+            self.update({Attributes.STATE: States.UNAVAILABLE})
+            return
+        self._schedule_refresh()
+        self._push()
+
+    def _push(self) -> None:
+        discovery_done = bool(self._cameras) or self._last_discovery > 0
+        if discovery_done and not self._cameras:
+            self.update({
+                Attributes.STATE: States.UNAVAILABLE,
+                Attributes.MEDIA_TITLE: "Surveillance Station",
+                Attributes.MEDIA_ARTIST: "No cameras configured",
+            })
+            return
+
+        powered = self._powered
+        self.update({
+            Attributes.STATE: States.ON if powered else States.OFF,
+            Attributes.SOURCE: self._current_camera,
+            Attributes.SOURCE_LIST: self._get_camera_sources(),
+            Attributes.MEDIA_TITLE: self._view.get(Attributes.MEDIA_TITLE, ""),
+            Attributes.MEDIA_ARTIST: self._view.get(Attributes.MEDIA_ARTIST, ""),
+            Attributes.MEDIA_IMAGE_URL: self._view.get(Attributes.MEDIA_IMAGE_URL, "") if powered else "",
+            Attributes.VOLUME: 50,
+        })
+
+    def _schedule_refresh(self) -> None:
+        """Refresh in the background; sync_state never waits on the NAS."""
+        if not self._powered or (self._refresh_task and not self._refresh_task.done()):
+            return
+        now = time.monotonic()
+        if self._cameras:
+            if now - self._last_refresh < REFRESH_INTERVAL:
+                return
+        elif self._last_discovery and now - self._last_discovery < DISCOVERY_RETRY:
+            return
+        self._refresh_task = asyncio.create_task(self._refresh_and_push())
+
+    async def _refresh_and_push(self) -> None:
+        try:
+            if not self._cameras:
+                await self.initialize_cameras()
+                self._last_discovery = time.monotonic()
+            if self._cameras:
+                await self._update_camera_status()
+                await self._update_camera_display()
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOG.error(f"Error refreshing cameras: {ex}")
+        finally:
+            self._last_refresh = time.monotonic()
+        self._push()
 
     async def _discover_cameras(self) -> Dict[str, Dict[str, Any]]:
         """Camera discovery using working method."""
@@ -68,7 +156,7 @@ class SynologyCameraMonitor:
             return {}
         
         try:
-            cameras_data = await asyncio.to_thread(self._client._surveillance.camera_list)
+            cameras_data = await self._client._call(self._client._surveillance.camera_list)
             
             if not cameras_data or not cameras_data.get('success', False):
                 _LOG.warning("Camera list API call unsuccessful")
@@ -154,7 +242,7 @@ class SynologyCameraMonitor:
             
             if hasattr(self._client._surveillance, 'get_snapshot'):
                 try:
-                    snapshot_data = await asyncio.to_thread(self._client._surveillance.get_snapshot, camera_id)
+                    snapshot_data = await self._client._call(self._client._surveillance.get_snapshot, camera_id)
                     
                     if isinstance(snapshot_data, bytes) and len(snapshot_data) > 100:
                         base64_data = base64.b64encode(snapshot_data).decode('utf-8')
@@ -232,38 +320,7 @@ class SynologyCameraMonitor:
         else:
             return self._get_camera_icon_base64("camera_offline.png")
 
-    def _create_camera_media_player(self) -> MediaPlayer:
-        """Create camera media player entity."""
-        features = [
-            Features.ON_OFF,
-            Features.SELECT_SOURCE,
-            Features.VOLUME_UP_DOWN,
-            Features.MEDIA_TITLE,
-            Features.MEDIA_ARTIST,
-            Features.MEDIA_IMAGE_URL,
-        ]
-        
-        initial_icon = self._get_camera_icon_base64("surveillance_status.png")
-        
-        attributes = {
-            Attributes.STATE: States.PAUSED,
-            Attributes.SOURCE: self._current_camera,
-            Attributes.SOURCE_LIST: ["All Cameras"],
-            Attributes.MEDIA_TITLE: "Synology Camera Monitor",
-            Attributes.MEDIA_ARTIST: "Discovering cameras...",
-            Attributes.MEDIA_IMAGE_URL: initial_icon,
-            Attributes.VOLUME: 50
-        }
-        
-        return MediaPlayer(
-            identifier="synology_camera_monitor",
-            name="Synology Camera Monitor",
-            features=features,
-            attributes=attributes,
-            cmd_handler=self.handle_command
-        )
-
-    async def handle_command(self, entity_arg: ucapi.entity.Entity, cmd_id: str, params: Dict[str, Any] = None) -> StatusCodes:
+    async def handle_command(self, entity_arg, cmd_id: str, params: Dict[str, Any] = None) -> StatusCodes:
         """Handle camera media player commands."""
         try:
             if cmd_id == Commands.SELECT_SOURCE:
@@ -273,46 +330,32 @@ class SynologyCameraMonitor:
                     return StatusCodes.OK
                 return StatusCodes.BAD_REQUEST
             elif cmd_id == Commands.ON:
-                await self._handle_camera_on()
-                return StatusCodes.OK
-            elif cmd_id == Commands.OFF:
-                await self._handle_camera_off()
-                return StatusCodes.OK
-            elif cmd_id == Commands.VOLUME_UP:
+                self._powered = True
                 await self._refresh_camera_display()
                 return StatusCodes.OK
-            elif cmd_id == Commands.VOLUME_DOWN:
+            elif cmd_id == Commands.OFF:
+                self._powered = False
+                self._push()
+                return StatusCodes.OK
+            elif cmd_id in (Commands.VOLUME_UP, Commands.VOLUME_DOWN):
                 await self._refresh_camera_display()
                 return StatusCodes.OK
             elif cmd_id in SUPPRESSED_COMMANDS:
                 return StatusCodes.OK
             else:
                 return StatusCodes.NOT_IMPLEMENTED
-                
+
         except Exception as ex:
             _LOG.error(f"Error handling camera command '{cmd_id}': {ex}")
             return StatusCodes.SERVER_ERROR
 
     async def _handle_camera_selection(self, camera_source: str) -> None:
         """Handle camera source selection."""
-        if camera_source != self._current_camera:
+        if camera_source != self._current_camera and camera_source in self._get_camera_sources():
             _LOG.info(f"Switching to camera source: {camera_source}")
             self._current_camera = camera_source
-            self._entity.attributes[Attributes.SOURCE] = camera_source
             await self._update_camera_display()
-            self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-
-    async def _handle_camera_on(self) -> None:
-        """Start camera monitoring."""
-        self._entity.attributes[Attributes.STATE] = States.PLAYING
-        await self.start()
-        self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-
-    async def _handle_camera_off(self) -> None:
-        """Stop camera monitoring."""
-        await self.stop()
-        self._entity.attributes[Attributes.STATE] = States.PAUSED
-        self._api.configured_entities.update_attributes(self.entity_id, {Attributes.STATE: States.PAUSED})
+            self._push()
 
     async def _update_camera_display(self) -> None:
         """Update camera display based on current selection."""
@@ -330,8 +373,8 @@ class SynologyCameraMonitor:
         line1 = f"Surveillance - {total_cameras} cameras"
         line2 = f"Online: {online_cameras} | Recording: {recording_cameras}"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
-        self._entity.attributes[Attributes.MEDIA_IMAGE_URL] = self._get_status_icon("All Cameras")
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_IMAGE_URL] = self._get_status_icon("All Cameras")
 
     async def _update_single_camera_display(self, camera_name: str) -> None:
         """Update display for single camera with HOME ASSISTANT snapshot method."""
@@ -353,23 +396,17 @@ class SynologyCameraMonitor:
         line1 = f"{camera_name} - {status_text}"
         line2 = f"{recording_text} | IP: {camera_ip}"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
         
         # HOME ASSISTANT: Try snapshot for online cameras
         if status == 1 and enabled:
             snapshot_image = await self._get_camera_snapshot_home_assistant_method(camera_name)
             if snapshot_image:
-                self._entity.attributes[Attributes.MEDIA_IMAGE_URL] = snapshot_image
+                self._view[Attributes.MEDIA_IMAGE_URL] = snapshot_image
                 return
         
         # Fallback to status icon
-        self._entity.attributes[Attributes.MEDIA_IMAGE_URL] = self._get_status_icon(camera_name)
-
-    async def _refresh_camera_display(self) -> None:
-        """Refresh current camera display."""
-        await self._update_camera_status()
-        await self._update_camera_display()
-        self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
+        self._view[Attributes.MEDIA_IMAGE_URL] = self._get_status_icon(camera_name)
 
     async def _update_camera_status(self) -> None:
         """Update camera status."""
@@ -377,7 +414,7 @@ class SynologyCameraMonitor:
             return
         
         try:
-            cameras_data = await asyncio.to_thread(self._client._surveillance.camera_list)
+            cameras_data = await self._client._call(self._client._surveillance.camera_list)
             
             if cameras_data and cameras_data.get('success', False):
                 cameras_raw = safe_get_nested_value(cameras_data, ['data', 'cameras'], [])
@@ -399,76 +436,28 @@ class SynologyCameraMonitor:
         except Exception as ex:
             _LOG.error(f"Error updating camera status: {ex}")
 
-    async def _camera_polling_loop(self) -> None:
-        """Camera monitoring polling loop."""
-        _LOG.info("Camera polling loop started")
-        while True:
-            try:
-                await self._update_camera_status()
-                await self._update_camera_display()
-                self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-                await asyncio.sleep(20)
-            except asyncio.CancelledError:
-                _LOG.info("Camera polling loop cancelled")
-                break
-            except Exception as ex:
-                _LOG.error(f"Error in camera polling: {ex}")
-                await asyncio.sleep(30)
+    async def _refresh_camera_display(self) -> None:
+        """Refresh current camera display."""
+        if not self._cameras:
+            await self.initialize_cameras()
+            self._last_discovery = time.monotonic()
+        await self._update_camera_status()
+        await self._update_camera_display()
+        self._last_refresh = time.monotonic()
+        self._push()
 
     async def initialize_cameras(self) -> bool:
         """Initialize camera discovery."""
+        if not await self._client.ensure_surveillance():
+            return False
+
         self._cameras = await self._discover_cameras()
-        
         if not self._cameras:
             return False
-        
-        camera_sources = self._get_camera_sources()
-        self._entity.attributes[Attributes.SOURCE_LIST] = camera_sources
-        
+
+        if self._current_camera not in self._get_camera_sources():
+            self._current_camera = "All Cameras"
+        await self._update_camera_display()
         _LOG.info(f"Initialized {len(self._cameras)} cameras")
         return True
 
-    async def push_initial_state(self) -> None:
-        """Initialize cameras and push initial state."""
-        try:
-            if await self.initialize_cameras():
-                await self._update_camera_display()
-                self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-                await self.start()
-            else:
-                self._entity.attributes[Attributes.MEDIA_TITLE] = "Surveillance Station"
-                self._entity.attributes[Attributes.MEDIA_ARTIST] = "No cameras configured"
-                self._entity.attributes[Attributes.STATE] = States.UNAVAILABLE
-                self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-                
-        except Exception as ex:
-            _LOG.error(f"Error pushing initial camera state: {ex}")
-
-    async def start(self) -> None:
-        """Start camera monitoring."""
-        if not self._polling_task or self._polling_task.done():
-            if self._client.connected and self._cameras:
-                self._entity.attributes[Attributes.STATE] = States.PLAYING
-                self._polling_task = asyncio.create_task(self._camera_polling_loop())
-
-    async def stop(self) -> None:
-        """Stop camera monitoring."""
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
-            self._polling_task = None
-
-    @property
-    def entity(self) -> MediaPlayer:
-        return self._entity
-
-    @property
-    def entity_id(self) -> str:
-        return self._entity.id
-
-    @property
-    def has_cameras(self) -> bool:
-        return len(self._cameras) > 0

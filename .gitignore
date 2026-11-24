@@ -89,3 +89,12 @@ artifacts/
 version_info.txt
 tools/
 
+
+# Testing files (keep local only, never push to repository)
+tests/
+simulator/
+
+# Claude knowledge base (local only, never commit)
+.claude/
+knowledge-base/
+*.knowledge.md

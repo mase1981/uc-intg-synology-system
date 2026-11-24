@@ -57,10 +57,13 @@ Transform your remote into a powerful NAS monitoring dashboard with real-time vi
 - **User Sessions** - Active user sessions and connections
 
 ### 📈 **Sensors**
-- **CPU Usage, Memory Usage, Storage Used** - Percentages for Remote pages and activities
-- **Temperature** - Converted to °C or °F automatically by the Remote
+- **CPU Usage, Memory Usage, Swap Usage, Storage Used, Volume Usage** - Percentages for Remote pages and activities
+- **Temperature, Disk Temperature** - Converted to °C or °F automatically by the Remote
+- **Network Download / Upload** - Current throughput in KB/s
+- **Volume Status, Drive Health, RAID Status, Services Running** - Health summaries
+- **Cameras, Cameras Recording** - Only when Surveillance Station is installed
 - **Uptime, Status, DSM Version** - Text sensors
-- Updated by the background monitor (every 30 seconds; storage every 5 minutes)
+- Updated every 15 seconds; storage, drive and RAID data every 5 minutes
 
 ### 🎮 **System Control Commands**
 
@@ -191,12 +194,13 @@ docker run -d --name uc-intg-synology-system --restart unless-stopped --network 
 #### **Authentication:**
 - **Username**: Your DSM username
 - **Password**: Your DSM password
-- **2FA Code**: If two-factor authentication is enabled
+- **2FA Code**: If two-factor authentication is enabled. Enter the current code once; the integration then stores a DSM device token so it can log in again after a reboot without a new code
 
 #### **Connection Test:**
 - Integration will test your Synology API credentials
 - Verify your Synology profile is accessible
-- Setup fails if device unreachable
+- Setup fails if device unreachable, and the reason (wrong password, 2FA, blocked IP) is shown on the form
+- To change settings later, open the integration setup and choose **Update**. Leave the password empty to keep the saved one
 
 4. Integration will create entities:
    - **Synology System Monitor**: Media Player entity for dashboard

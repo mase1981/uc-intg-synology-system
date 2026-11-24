@@ -7,15 +7,17 @@ Synology API client wrapper for system monitoring.
 
 import asyncio
 import logging
+import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     from synology_api import core_sys_info
-    from synology_api.docker_api import Docker
+    from synology_api.base_api import BaseApi
     from synology_api.surveillancestation import SurveillanceStation
     SYNOLOGY_API_AVAILABLE = True
 except ImportError:
+    BaseApi = None
     SYNOLOGY_API_AVAILABLE = False
 
 from uc_intg_synology_system.helpers import (
@@ -27,6 +29,28 @@ from uc_intg_synology_system.helpers import (
 
 _LOG = logging.getLogger(__name__)
 
+# Serialises the temporary swap of synology_api's class-level session.
+_SESSION_LOCK = threading.Lock()
+
+_SESSION_ERROR_CODES = {105, 106, 107, 119}
+# 400 wrong credentials, 401 disabled account, 402 permission denied, 403/404/406 2FA,
+# 407 IP blocked, 408-410 password expired.
+_AUTH_ERROR_CODES = {400, 401, 402, 403, 404, 406, 407, 408, 409, 410}
+_AUTH_ERROR_TEXT = {
+    400: "Wrong username or password",
+    401: "Account disabled",
+    402: "Permission denied",
+    403: "2-factor code required",
+    404: "2-factor code rejected",
+    406: "2-factor authentication is enforced",
+    407: "IP address blocked by DSM Auto Block",
+    408: "Password expired",
+    409: "Password expired",
+    410: "Password must be changed",
+}
+_CACHE_TTL = 5.0
+
+
 def parse_uptime_string(uptime_str: str) -> int:
     """Parses uptime string like '748:31:1' into total seconds."""
     try:
@@ -34,16 +58,45 @@ def parse_uptime_string(uptime_str: str) -> int:
         if len(parts) == 3:
             h, m, s = parts
             return h * 3600 + m * 60 + s
-        return int(uptime_str) # Fallback for plain seconds
-    except (ValueError, TypeError):
+        return int(uptime_str)
+    except (ValueError, TypeError, AttributeError):
         return 0
 
+
+def _build_api(api_class, shared_session=None, **kwargs):
+    """Create a synology_api object with its own session.
+
+    synology_api keeps the first session in a class-level attribute and silently
+    reuses it for every later object, ignoring new credentials, host and port.
+    That produced "Invalid session / SID not found" after a reconfigure. The
+    class-level session is cleared before and after each construction so objects
+    never share a session unless one is passed in explicitly.
+    """
+    with _SESSION_LOCK:
+        BaseApi.shared_session = shared_session
+        try:
+            return api_class(**kwargs)
+        finally:
+            BaseApi.shared_session = None
+
+
+def _release_session(api_object) -> None:
+    """Log out one synology_api object without touching any other session."""
+    session = getattr(api_object, "session", None)
+    if session is None:
+        return
+    try:
+        session.logout()
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+
 class SynologySystemClient:
-    """Synology API client wrapper with 2FA reboot survival capability."""
+    """Synology API client wrapper with 2FA device token support."""
 
     def __init__(self, host: str, port: int, username: str, password: str,
                  secure: bool = True, dsm_version: int = 7, otp_code: str = None,
-                 temperature_unit: str = "celsius"):
+                 temperature_unit: str = "celsius", device_token: str = None):
         self._host = host
         self._port = port
         self._username = username
@@ -52,80 +105,154 @@ class SynologySystemClient:
         self._dsm_version = dsm_version
         self._otp_code = otp_code
         self._temperature_unit = temperature_unit
+        self._device_token = device_token or None
 
         self._sys_info = None
         self._docker = None
         self._surveillance = None
 
         self._connected = False
-        self._last_error = None
+        self._last_error: Optional[str] = None
+        self._auth_failed = False
+        self._session_invalid = False
         self._available_packages = {}
+        self._cache: Dict[str, Any] = {}
+        self._lock = asyncio.Lock()
 
         self._session_id = None
         self._session_timestamp = None
         self._initial_connection_made = False
 
     async def connect(self) -> bool:
-        """Connect to Synology NAS with 2FA reboot survival logic."""
-        try:
-            _LOG.info(f"Connecting to Synology NAS at {self._host}:{self._port}")
+        """Open a fresh DSM session. Any previous session is closed first."""
+        async with self._lock:
+            await self._close_sessions()
+            self._auth_failed = False
+            self._last_error = None
+            try:
+                _LOG.info(f"Connecting to Synology NAS at {self._host}:{self._port}")
 
-            self._sys_info = await asyncio.to_thread(
-                core_sys_info.SysInfo,
-                ip_address=self._host,
-                port=self._port,
-                username=self._username,
-                password=self._password,
-                secure=self._secure,
-                dsm_version=self._dsm_version,
-                otp_code=self._otp_code if self._otp_code else None
-            )
+                self._sys_info = await asyncio.to_thread(
+                    _build_api,
+                    core_sys_info.SysInfo,
+                    ip_address=self._host,
+                    port=self._port,
+                    username=self._username,
+                    password=self._password,
+                    secure=self._secure,
+                    dsm_version=self._dsm_version,
+                    otp_code=self._otp_code if self._otp_code else None,
+                    device_id=self._device_token,
+                )
+                self._otp_code = None
 
-            # Test connection with a basic API call
-            test_response = await asyncio.to_thread(self._sys_info.get_system_info)
-            if test_response and test_response.get('success'):
-                self._connected = True
-                self._initial_connection_made = True
-                self._session_timestamp = time.time()
+                session_token = getattr(self._sys_info.session, "device_id", None)
+                if session_token:
+                    self._device_token = session_token
 
-                # Detect available packages using real services
-                await self._detect_available_packages()
+                test_response = await self._system_info_raw()
+                if test_response and test_response.get('success'):
+                    self._connected = True
+                    self._session_invalid = False
+                    self._initial_connection_made = True
+                    self._session_timestamp = time.time()
+                    self._cache.clear()
 
-                model = test_response.get('data', {}).get('model', 'Unknown')
-                _LOG.info(f"Successfully connected to {model}")
-                return True
-            else:
-                _LOG.error("System info test failed during connection")
+                    await self._detect_available_packages()
+
+                    model = test_response.get('data', {}).get('model', 'Unknown')
+                    _LOG.info(f"Successfully connected to {model}")
+                    return True
+
+                self._last_error = "System info test failed during connection"
+                _LOG.error(self._last_error)
+                await self._close_sessions()
                 return False
 
+            except Exception as ex:
+                self._connected = False
+                self._last_error = self._describe_error(ex)
+                if getattr(ex, "error_code", None) in _AUTH_ERROR_CODES:
+                    self._auth_failed = True
+                _LOG.error(f"Connection failed: {self._last_error}")
+                await self._close_sessions()
+                return False
+
+    @staticmethod
+    def _describe_error(ex: Exception) -> str:
+        code = getattr(ex, "error_code", None)
+        if code in _AUTH_ERROR_TEXT:
+            return f"Authentication failed: {_AUTH_ERROR_TEXT[code]}"
+        return str(ex) or ex.__class__.__name__
+
+    async def _close_sessions(self) -> None:
+        """Log out and drop the DSM session(s) held by this client."""
+        surveillance, sys_info = self._surveillance, self._sys_info
+        self._surveillance = None
+        self._sys_info = None
+        self._connected = False
+        self._cache.clear()
+        for api_object in (surveillance, sys_info):
+            if api_object is not None:
+                await asyncio.to_thread(_release_session, api_object)
+
+    async def _call(self, func: Callable, *args, **kwargs):
+        """Run a blocking synology_api call in a thread and track session loss."""
+        try:
+            result = await asyncio.to_thread(func, *args, **kwargs)
         except Exception as ex:
-            _LOG.error(f"Connection failed: {ex}")
-            self._connected = False
-            self._last_error = str(ex)
-            return False
+            if getattr(ex, "error_code", None) in _SESSION_ERROR_CODES:
+                self._session_invalid = True
+            raise
+        if isinstance(result, dict) and result.get("success") is False:
+            code = safe_get_nested_value(result, ["error", "code"], None)
+            if code in _SESSION_ERROR_CODES:
+                self._session_invalid = True
+        return result
+
+    async def _cached(self, key: str, func: Callable) -> Any:
+        """Share one NAS request between the getters that need the same data."""
+        entry = self._cache.get(key)
+        now = time.monotonic()
+        if entry and now - entry[0] < _CACHE_TTL:
+            return entry[1]
+        value = await self._call(func)
+        self._cache[key] = (now, value)
+        return value
+
+    async def _system_info_raw(self):
+        return await self._cached("info", self._sys_info.get_system_info)
+
+    async def _utilization_raw(self):
+        return await self._cached("util", self._sys_info.get_all_system_utilization)
+
+    async def _storage_raw(self):
+        return await self._cached("storage", self._sys_info.storage)
+
+    async def _services_raw(self):
+        return await self._cached("services", self._sys_info.services_status)
 
     async def _detect_available_packages(self) -> None:
         """Detect available packages from the API."""
         try:
-            services_response = await asyncio.to_thread(self._sys_info.services_status)
+            services_response = await self._call(self._sys_info.services_status)
             if services_response and services_response.get('success'):
                 services = services_response.get('data', {}).get('service', [])
 
-                # Clear and rebuild the package list based on available services
-                self._available_packages = {}
+                packages = {}
 
                 for service in services:
                     service_id = service.get('service_id', '').lower()
                     service_name = service.get('service', service_id)
 
-                    # Map services to package names
                     if 'docker' in service_id:
-                        self._available_packages['Docker'] = 'Docker'
+                        packages['Docker'] = 'Docker'
                     elif 'surveillance' in service_id:
-                        self._available_packages['SurveillanceStation'] = 'Surveillance Station'
+                        packages['SurveillanceStation'] = 'Surveillance Station'
                     elif any(pkg in service_id for pkg in ['audio', 'video', 'photo']):
-                        self._available_packages[service_name] = service_name
+                        packages[service_name] = service_name
 
+                self._available_packages = packages
                 _LOG.info(f"Detected packages: {list(self._available_packages.keys())}")
 
         except Exception as ex:
@@ -136,18 +263,45 @@ class SynologySystemClient:
         return self._connected
 
     @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
+
+    @property
+    def auth_failed(self) -> bool:
+        """True when the last login was refused for a reason retries cannot fix."""
+        return self._auth_failed
+
+    @property
+    def session_invalid(self) -> bool:
+        """True when DSM reported the session as expired or replaced."""
+        return self._session_invalid
+
+    @property
+    def device_token(self) -> Optional[str]:
+        """DSM 2FA device token; lets later logins skip the OTP prompt."""
+        return self._device_token
+
+    @property
     def available_packages(self) -> Dict[str, str]:
         return self._available_packages
 
-    async def disconnect(self) -> None:
-        """Disconnect from the Synology NAS."""
-        if self._sys_info:
-            try:
-                await asyncio.to_thread(self._sys_info.logout)
-            except:
-                pass  # Ignore logout errors
+    def mark_disconnected(self) -> None:
         self._connected = False
+
+    async def disconnect(self) -> None:
+        """Log out of the Synology NAS."""
+        async with self._lock:
+            await self._close_sessions()
         _LOG.info("Disconnected from Synology NAS")
+
+    async def beep(self, enable: bool) -> None:
+        await self._call(self._sys_info.enable_beep_control, enable)
+
+    async def reboot(self) -> None:
+        await self._call(self._sys_info.reboot)
+
+    async def shutdown(self) -> None:
+        await self._call(self._sys_info.shutdown)
 
     async def get_system_overview(self, initial_fetch: bool = False) -> Dict[str, Any]:
         """Get system overview information."""
@@ -156,15 +310,26 @@ class SynologySystemClient:
             if initial_fetch:
                 await asyncio.sleep(1)
 
-            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
-            util_raw = await asyncio.to_thread(self._sys_info.get_all_system_utilization)
+            info_raw = await self._system_info_raw()
+            util_raw = await self._utilization_raw()
 
             cpu_load = safe_get_nested_value(util_raw, ['cpu', 'user_load'], 0)
             mem_usage = safe_get_nested_value(util_raw, ['memory', 'real_usage'], 0)
             temp_c = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
             uptime_str = safe_get_nested_value(info_raw, ['data', 'up_time'], "0:0:0")
+            swap_usage = safe_get_nested_value(util_raw, ['memory', 'swap_usage'], None)
+
+            network_rx = network_tx = None
+            for net_entry in safe_get_nested_value(util_raw, ['network'], []) or []:
+                if isinstance(net_entry, dict) and net_entry.get('device') == 'total':
+                    network_rx = float(net_entry.get('rx', 0))
+                    network_tx = float(net_entry.get('tx', 0))
+                    break
 
             return {
+                "swap_usage": float(swap_usage) if swap_usage is not None else None,
+                "network_rx": network_rx,
+                "network_tx": network_tx,
                 "model": safe_get_nested_value(info_raw, ['data', 'model'], "N/A"),
                 "version": safe_get_nested_value(info_raw, ['data', 'firmware_ver'], 'N/A'),
                 "status": "healthy",
@@ -182,7 +347,7 @@ class SynologySystemClient:
         """Get storage status information."""
         if not self._connected: return {}
         try:
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            storage_raw = await self._storage_raw()
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
             total_size = sum(int(vol.get('size', {}).get('total', '0')) for vol in volumes)
             total_used = sum(int(vol.get('size', {}).get('used', '0')) for vol in volumes)
@@ -197,10 +362,10 @@ class SynologySystemClient:
             return {"status": "unavailable", "interfaces": 0, "total_rx": 0, "total_tx": 0}
 
         try:
-            net_raw = await asyncio.to_thread(self._sys_info.get_network_info)
+            net_raw = await self._call(self._sys_info.get_network_info)
             interfaces = safe_get_nested_value(net_raw, ['data', 'nif'], [])
             
-            util_raw = await asyncio.to_thread(self._sys_info.get_all_system_utilization)
+            util_raw = await self._utilization_raw()
             network_data = util_raw.get('network', [])
             _LOG.debug(f"Network data found: {network_data}")
             
@@ -238,7 +403,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "running_count": 0, "total_count": 0}
 
         try:
-            services_raw = await asyncio.to_thread(self._sys_info.services_status)
+            services_raw = await self._services_raw()
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
 
             if not service_list:
@@ -295,13 +460,37 @@ class SynologySystemClient:
         if not self._connected: return {}
         return {}
 
+    async def ensure_surveillance(self) -> bool:
+        """Create the Surveillance Station API object on the existing DSM session."""
+        if self._surveillance:
+            return True
+        if not self._connected or not self._sys_info:
+            return False
+        try:
+            self._surveillance = await asyncio.to_thread(
+                _build_api,
+                SurveillanceStation,
+                shared_session=self._sys_info.session,
+                ip_address=self._host,
+                port=self._port,
+                username=self._username,
+                password=self._password,
+                secure=self._secure,
+                dsm_version=self._dsm_version,
+            )
+            return True
+        except Exception as surv_ex:
+            _LOG.warning(f"Could not initialize Surveillance Station API: {surv_ex}")
+            self._surveillance = None
+            return False
+
     async def get_surveillance_status(self) -> Dict[str, Any]:
         """Get Surveillance Station status with camera data."""
         if not self._connected:
             return {"status": "unavailable", "camera_count": 0, "recording_count": 0}
 
         try:
-            services_raw = await asyncio.to_thread(self._sys_info.services_status)
+            services_raw = await self._services_raw()
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             
             surveillance_services = [s for s in service_list if 'surveillance' in s.get('service_id', '').lower()]
@@ -315,29 +504,15 @@ class SynologySystemClient:
                     "surveillance_enabled": False
                 }
 
-            if not self._surveillance:
-                try:
-                    from synology_api.surveillancestation import SurveillanceStation
-                    self._surveillance = await asyncio.to_thread(
-                        SurveillanceStation,
-                        ip_address=self._host,
-                        port=self._port,
-                        username=self._username,
-                        password=self._password,
-                        secure=self._secure,
-                        dsm_version=self._dsm_version,
-                        otp_code=self._otp_code
-                    )
-                except Exception as surv_ex:
-                    _LOG.warning(f"Could not initialize Surveillance Station API: {surv_ex}")
-                    return {
-                        "status": "api_error",
-                        "camera_count": 0,
-                        "recording_count": 0,
-                        "error": str(surv_ex)
-                    }
+            if not await self.ensure_surveillance():
+                return {
+                    "status": "api_error",
+                    "camera_count": 0,
+                    "recording_count": 0,
+                    "error": self._last_error or "Surveillance Station API unavailable"
+                }
 
-            camera_data = await asyncio.to_thread(self._surveillance.camera_list)
+            camera_data = await self._call(self._surveillance.camera_list)
             
             if camera_data and camera_data.get('success'):
                 cameras = camera_data.get('data', {}).get('cameras', [])
@@ -380,7 +555,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "system_temp": 0, "cpu_temp": 0, "temperature_formatted": "N/A"}
 
         try:
-            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
+            info_raw = await self._system_info_raw()
             temp_c = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
 
             fan_mode = "full_speed"  # Default for enterprise NAS models
@@ -428,7 +603,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "cache_enabled": False, "cache_usage": 0}
 
         try:
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            storage_raw = await self._storage_raw()
 
             ssd_caches = safe_get_nested_value(storage_raw, ['data', 'ssdCaches'], [])
             shared_caches = safe_get_nested_value(storage_raw, ['data', 'sharedCaches'], [])
@@ -506,7 +681,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "raid_level": "unknown", "degraded_drives": 0}
 
         try:
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            storage_raw = await self._storage_raw()
             storage_pools = safe_get_nested_value(storage_raw, ['data', 'storagePools'], [])
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
@@ -574,7 +749,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "volume_count": 0, "healthy_volumes": 0}
 
         try:
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            storage_raw = await self._storage_raw()
             volumes = safe_get_nested_value(storage_raw, ['data', 'volumes'], [])
 
             volume_count = len(volumes)
@@ -630,11 +805,11 @@ class SynologySystemClient:
             return {"status": "unavailable", "ups_connected": False, "battery_level": 0, "ups_model": "Unknown"}
 
         try:
-            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
+            info_raw = await self._system_info_raw()
             ups_info = safe_get_nested_value(info_raw, ['data', 'ups_info'], {})
             ext_power_status = safe_get_nested_value(info_raw, ['data', 'ext_power_status'], 0)
 
-            services_raw = await asyncio.to_thread(self._sys_info.services_status)
+            services_raw = await self._services_raw()
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             ups_services = [s for s in service_list if 'ups' in s.get('service_id', '').lower()]
             ups_service_enabled = any(s.get('enable_status') == 'enabled' for s in ups_services)
@@ -693,8 +868,8 @@ class SynologySystemClient:
             return {"status": "unavailable", "cpu_temp": 0, "monitored_drives": 0}
 
         try:
-            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            info_raw = await self._system_info_raw()
+            storage_raw = await self._storage_raw()
 
             cpu_temp = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
@@ -724,7 +899,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "total_drives": 0, "healthy_drives": 0}
 
         try:
-            storage_raw = await asyncio.to_thread(self._sys_info.storage)
+            storage_raw = await self._storage_raw()
             disks = safe_get_nested_value(storage_raw, ['data', 'disks'], [])
 
             total_drives = len(disks)
@@ -762,7 +937,7 @@ class SynologySystemClient:
             }
 
         try:
-            info_raw = await asyncio.to_thread(self._sys_info.get_system_info)
+            info_raw = await self._system_info_raw()
             sys_temp = safe_get_nested_value(info_raw, ['data', 'sys_temp'], 0)
             model = safe_get_nested_value(info_raw, ['data', 'model'], 'Unknown')
             version_string = safe_get_nested_value(info_raw, ['data', 'version_string'], 'Unknown')
@@ -770,7 +945,7 @@ class SynologySystemClient:
             ups_info = safe_get_nested_value(info_raw, ['data', 'ups_info'], {})
             ext_power_status = safe_get_nested_value(info_raw, ['data', 'ext_power_status'], 0)
 
-            services_raw = await asyncio.to_thread(self._sys_info.services_status)
+            services_raw = await self._services_raw()
             service_list = safe_get_nested_value(services_raw, ['data', 'service'], [])
             ups_services = [s for s in service_list if 'ups' in s.get('service_id', '').lower()]
             ups_service_enabled = any(s.get('enable_status') in ['enabled', 'static'] for s in ups_services)
@@ -825,7 +1000,7 @@ class SynologySystemClient:
             return {"status": "unavailable", "error": "Not connected to NAS"}
 
         try:
-            storage_response = await asyncio.to_thread(self._sys_info.storage)
+            storage_response = await self._storage_raw()
 
             if not storage_response or not storage_response.get('success'):
                 _LOG.error("storage() API call failed")

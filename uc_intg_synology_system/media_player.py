@@ -1,5 +1,5 @@
 """
-Media Player entity for Synology System monitoring dashboard
+Media Player entity for the Synology System monitoring dashboard
 
 :copyright: (c) 2024 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
@@ -9,17 +9,20 @@ import asyncio
 import base64
 import logging
 import os
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Optional
 
-import ucapi
 from ucapi import StatusCodes
-from ucapi.media_player import Attributes, Commands, Features, MediaPlayer, States
+from ucapi.media_player import Attributes, Commands, Features, States
+from ucapi_framework import MediaPlayerEntity
 
-from uc_intg_synology_system.client import SynologySystemClient
 from uc_intg_synology_system.config import SynologyConfig
+from uc_intg_synology_system.device import SynologyDevice
 from uc_intg_synology_system.helpers import create_two_line_display
 
 _LOG = logging.getLogger(__name__)
+
+REFRESH_INTERVAL = 15
 
 # Commands to suppress to prevent red error messages and accidental system actions
 SUPPRESSED_COMMANDS = [
@@ -39,40 +42,61 @@ SUPPRESSED_COMMANDS = [
 ]
 
 
-class SynologySystemDashboard:
+class SynologySystemDashboard(MediaPlayerEntity):
+    """Information display that shows one NAS status view at a time."""
 
-    def __init__(self, api: ucapi.IntegrationAPI, client: SynologySystemClient, config: SynologyConfig):
-        """
-        Initialize system dashboard.
-        
-        :param api: The ucapi IntegrationAPI instance
-        :param client: Synology API client
-        :param config: Configuration manager
-        """
-        self._api = api
-        self._client = client
+    def __init__(self, config: SynologyConfig, device: SynologyDevice):
+        self._device = device
         self._config = config
         self._current_source = "System Overview"
         self._sources = self._get_enabled_sources()
-        self._polling_task = None
-        self._last_data = {}
-        self._icon_cache = {}  # Cache for base64 icons
-        
+        self._icon_cache = {}
+        self._powered = True
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._last_refresh = 0.0
+        self._view: Dict[str, Any] = {
+            Attributes.MEDIA_TITLE: "Synology System Monitor",
+            Attributes.MEDIA_ARTIST: "Initializing...",
+        }
+
         _LOG.info(f"Initializing dashboard with sources: {list(self._sources.keys())}")
-        
-        self._entity = self._create_media_player_entity()
-        
-        _LOG.info(f"Synology System Dashboard initialized with sources: {list(self._sources.keys())}")
+
+        features = [
+            Features.ON_OFF,
+            Features.SELECT_SOURCE,
+            Features.VOLUME_UP_DOWN,
+            Features.MEDIA_TITLE,
+            Features.MEDIA_ARTIST,
+            Features.MEDIA_IMAGE_URL,
+        ]
+        super().__init__(
+            "synology_system_dashboard",
+            "Synology System Monitor",
+            features,
+            {
+                Attributes.STATE: States.UNKNOWN,
+                Attributes.SOURCE: "",
+                Attributes.SOURCE_LIST: [],
+                Attributes.MEDIA_TITLE: "",
+                Attributes.MEDIA_ARTIST: "",
+                Attributes.MEDIA_IMAGE_URL: "",
+                Attributes.VOLUME: 0,
+            },
+            cmd_handler=self.handle_command,
+        )
+        self.subscribe_to_device(device)
+
+    @property
+    def _client(self):
+        return self._device.client
 
     def _get_enabled_sources(self) -> Dict[str, str]:
         sources = self._config.get_enabled_sources()
-        
-        # Limit to 25 sources maximum for media player
+
         if len(sources) > 25:
-            _LOG.warning(f"Too many sources ({len(sources)}), limiting to 20")
-            source_items = list(sources.items())[:25]
-            sources = dict(source_items)
-        
+            _LOG.warning(f"Too many sources ({len(sources)}), limiting to 25")
+            sources = dict(list(sources.items())[:25])
+
         return sources
 
     def _get_icon_base64(self, icon_filename: str) -> str:
@@ -82,7 +106,7 @@ class SynologySystemDashboard:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_dir = os.path.join(script_dir, "icons")
         icon_path = os.path.join(icon_dir, icon_filename)
-        
+
         fallback_icons = ["synology_logo.png", "system_overview.png"]
 
         if not os.path.exists(icon_path):
@@ -102,7 +126,6 @@ class SynologySystemDashboard:
                 base64_data = base64.b64encode(icon_data).decode('utf-8')
                 data_url = f"data:image/png;base64,{base64_data}"
                 self._icon_cache[icon_filename] = data_url
-                _LOG.info(f"Loaded and cached icon: {icon_filename}")
                 return data_url
         except Exception as e:
             _LOG.error(f"Failed to read icon {icon_path}: {e}")
@@ -112,7 +135,7 @@ class SynologySystemDashboard:
         """Get the proper base64 image data for a given source with complete mapping."""
         source_images = {
             "System Overview": "system_overview.png",
-            "Storage Status": "storage_status.png", 
+            "Storage Status": "storage_status.png",
             "Network Statistics": "network_stats.png",
             "Services Status": "services_status.png",
             "Security Status": "security_status.png",
@@ -123,56 +146,56 @@ class SynologySystemDashboard:
             "RAID Health": "raid_status.png",
             "Volume Usage": "volume_status.png",
             "UPS Monitor": "ups_status.png",
-            # Enhanced source mappings
             "Hardware Monitor": "hardware_monitor.png",
-            "Drive Health": "drive_health.png", 
+            "Drive Health": "drive_health.png",
             "Power Management": "power_management.png",
             "Cache Performance": "cache_performance.png",
             "Package Manager": "package_manager.png",
             "User Sessions": "user_sessions.png"
         }
-        
-        image_filename = source_images.get(source, "synology_logo.png")
-        _LOG.debug(f"Source '{source}' mapped to icon '{image_filename}'")
-        return self._get_icon_base64(image_filename)
 
-    def _create_media_player_entity(self) -> MediaPlayer:
-        """Create media player entity for system dashboard."""
-        features = [
-            Features.ON_OFF,
-            Features.SELECT_SOURCE,
-            Features.VOLUME_UP_DOWN,
-            Features.MEDIA_TITLE,
-            Features.MEDIA_ARTIST,
-            Features.MEDIA_IMAGE_URL,
-        ]
-        
-        initial_icon_base64 = self._get_source_image(self._current_source)
-        
-        attributes = {
-            Attributes.STATE: States.PAUSED,
+        return self._get_icon_base64(source_images.get(source, "synology_logo.png"))
+
+    async def sync_state(self) -> None:
+        if self._device.state == "UNAVAILABLE":
+            self.update({Attributes.STATE: States.UNAVAILABLE})
+            return
+        self._schedule_refresh()
+        self._push()
+
+    def _push(self) -> None:
+        powered = self._powered
+        self.update({
+            Attributes.STATE: States.ON if powered else States.OFF,
             Attributes.SOURCE: self._current_source,
             Attributes.SOURCE_LIST: list(self._sources.values()),
-            Attributes.MEDIA_TITLE: "Synology System Monitor",
-            Attributes.MEDIA_ARTIST: "Initializing...",
-            Attributes.MEDIA_IMAGE_URL: initial_icon_base64,
-            Attributes.VOLUME: 50
-        }
-        
-        _LOG.debug(f"Created media player with base64 icon loaded: {bool(initial_icon_base64)}")
-        
-        return MediaPlayer(
-            identifier="synology_system_dashboard",
-            name="Synology System Monitor",
-            features=features,
-            attributes=attributes,
-            cmd_handler=self.handle_command
-        )
+            Attributes.MEDIA_TITLE: self._view.get(Attributes.MEDIA_TITLE, ""),
+            Attributes.MEDIA_ARTIST: self._view.get(Attributes.MEDIA_ARTIST, ""),
+            Attributes.MEDIA_IMAGE_URL: self._get_source_image(self._current_source) if powered else "",
+            Attributes.VOLUME: 50,
+        })
 
-    async def handle_command(self, entity_arg: ucapi.entity.Entity, cmd_id: str, params: Dict[str, Any] = None) -> StatusCodes:
-        """Handle media player commands - HTCP exact pattern."""
+    def _schedule_refresh(self, force: bool = False) -> None:
+        """Fetch the current view in the background; sync_state never waits on the NAS."""
+        if not self._powered or (self._refresh_task and not self._refresh_task.done()):
+            return
+        if not force and time.monotonic() - self._last_refresh < REFRESH_INTERVAL:
+            return
+        self._refresh_task = asyncio.create_task(self._refresh_and_push())
+
+    async def _refresh_and_push(self) -> None:
+        try:
+            await self._update_current_data()
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOG.error(f"Error refreshing dashboard: {ex}")
+        finally:
+            self._last_refresh = time.monotonic()
+        self._push()
+
+    async def handle_command(self, entity_arg, cmd_id: str, params: Dict[str, Any] = None) -> StatusCodes:
+        """Handle media player commands."""
         _LOG.debug(f"Received command: {cmd_id} with params: {params}")
-        
+
         try:
             if cmd_id == Commands.SELECT_SOURCE:
                 source = params.get("source") if params else None
@@ -181,83 +204,38 @@ class SynologySystemDashboard:
                     return StatusCodes.OK
                 return StatusCodes.BAD_REQUEST
             elif cmd_id == Commands.ON:
-                await self._handle_power_on()
+                self._powered = True
+                await self._refresh_display()
                 return StatusCodes.OK
             elif cmd_id == Commands.OFF:
-                await self._handle_power_off()
+                self._powered = False
+                self._push()
                 return StatusCodes.OK
-            elif cmd_id == Commands.VOLUME_UP:
-                await self._handle_navigate_next()
-                return StatusCodes.OK
-            elif cmd_id == Commands.VOLUME_DOWN:
-                await self._handle_navigate_previous()
+            elif cmd_id in (Commands.VOLUME_UP, Commands.VOLUME_DOWN):
+                await self._refresh_display()
                 return StatusCodes.OK
             elif cmd_id in SUPPRESSED_COMMANDS:
-                # HTCP exact pattern - silently ignore to prevent red errors
                 _LOG.debug(f"Ignoring unsupported media command '{cmd_id}' to prevent UI error.")
                 return StatusCodes.OK
             elif cmd_id in ["REFRESH_STATUS", "UPDATE_DISPLAY", "SYSTEM_INFO"]:
-                await self._handle_custom_command(cmd_id, params)
+                await self._refresh_display()
                 return StatusCodes.OK
             else:
                 _LOG.warning(f"Unhandled command: {cmd_id}")
                 return StatusCodes.NOT_IMPLEMENTED
-                
+
         except Exception as ex:
             _LOG.error(f"Error handling command '{cmd_id}': {ex}")
             return StatusCodes.SERVER_ERROR
 
-    async def push_initial_state(self) -> None:
-        """Fetch initial data, push it to the remote, and start monitoring - HTCP pattern."""
-        try:
-            _LOG.info("Pushing initial state for Synology System Dashboard.")
-            await self._update_source_display()
-            self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-            await self.start()
-        except Exception as ex:
-            _LOG.error(f"Error pushing initial state for dashboard: {ex}", exc_info=True)
-
     async def _handle_source_selection(self, source_name: str) -> None:
-        """Handle source selection - HTCP exact pattern."""
+        if source_name not in self._sources.values():
+            _LOG.warning(f"Unknown source requested: {source_name}")
+            return
         if source_name != self._current_source:
             _LOG.info(f"Switching monitoring view to: {source_name}")
             self._current_source = source_name
-            self._entity.attributes[Attributes.SOURCE] = source_name
-            self._entity.attributes[Attributes.MEDIA_IMAGE_URL] = self._get_source_image(source_name)
-            await self._update_current_data()
-            self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-
-    async def _handle_power_on(self) -> None:
-        """Handle power on - start monitoring."""
-        await self.start()
-        await self._update_current_data()
-        self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-
-    async def _handle_power_off(self) -> None:
-        """Handle power off - pause monitoring."""
-        await self.stop()
-        self._entity.attributes[Attributes.STATE] = States.PAUSED
-        self._api.configured_entities.update_attributes(self.entity_id, {Attributes.STATE: States.PAUSED})
-
-    async def _handle_navigate_next(self) -> None:
         await self._refresh_display()
-
-    async def _handle_navigate_previous(self) -> None:
-        await self._refresh_display()
-
-    async def _handle_custom_command(self, cmd_id: str, params: Dict[str, Any] = None) -> None:
-        if cmd_id in ["REFRESH_STATUS", "SYSTEM_INFO", "UPDATE_DISPLAY"]:
-            await self._refresh_display()
-
-    async def _update_source_display(self) -> None:
-        """Update display for current source."""
-        # Set base64 icon for current source
-        icon_base64 = self._get_source_image(self._current_source)
-        if icon_base64:
-            self._entity.attributes[Attributes.MEDIA_IMAGE_URL] = icon_base64
-            _LOG.debug(f"Set base64 icon for source {self._current_source}")
-        
-        await self._update_current_data()
 
     async def _update_current_data(self, force_refresh: bool = False) -> None:
         """Update current data based on selected source."""
@@ -325,26 +303,25 @@ class SynologySystemDashboard:
                 await updater(data)
             except AttributeError as ex:
                 _LOG.warning(f"Method not implemented for {source_key}: {ex}")
-                self._entity.attributes[Attributes.MEDIA_TITLE] = f"{self._current_source}"
-                self._entity.attributes[Attributes.MEDIA_ARTIST] = "Feature not available"
+                self._view[Attributes.MEDIA_TITLE] = f"{self._current_source}"
+                self._view[Attributes.MEDIA_ARTIST] = "Feature not available"
         else:
             _LOG.warning(f"No fetcher/updater found for source: {source_key}")
-            self._entity.attributes[Attributes.MEDIA_TITLE] = f"{self._current_source}"
-            self._entity.attributes[Attributes.MEDIA_ARTIST] = "Coming soon"
+            self._view[Attributes.MEDIA_TITLE] = f"{self._current_source}"
+            self._view[Attributes.MEDIA_ARTIST] = "Coming soon"
 
     async def _update_system_overview_display(self, data: Dict[str, Any]) -> None:
         if data:
-            self._entity.attributes[Attributes.STATE] = States.PLAYING if data.get('status') == "healthy" else States.PAUSED
             line1 = f"{data.get('model', 'NAS')} - {data.get('status', '...').title()}"
             line2 = f"CPU: {data.get('cpu_usage', 0):.1f}% | Mem: {data.get('memory_usage', 0):.1f}% | {data.get('temperature', 'N/A')}"
-            self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+            self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_storage_status_display(self, data: Dict[str, Any]) -> None:
         if data and data.get('total_size', 0) > 0:
             usage_pct = (data.get('total_used', 0) / data['total_size']) * 100
             line1 = f"Storage - {data.get('health_status', '...').title()}"
             line2 = f"Used: {usage_pct:.1f}%"
-            self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+            self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_network_stats_display(self, data: Dict[str, Any]) -> None:
         """Update network statistics display to show live totals from utilization API."""
@@ -371,8 +348,8 @@ class SynologySystemDashboard:
             line1 = "Network data unavailable"
             line2 = "Network Statistics"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_services_status_display(self, data: Dict[str, Any]) -> None:
         """Update services status display."""
@@ -394,14 +371,14 @@ class SynologySystemDashboard:
             line1 = "Services Status"
             line2 = "Service information unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_security_status_display(self, data: Dict[str, Any]) -> None:
         if data:
             firewall = "enabled" if data.get('firewall_enabled') else "disabled"
             line1 = f"Security - {data.get('status', '...').title()}"
             line2 = f"Issues: {data.get('issues_found', 0)} | Firewall: {firewall}"
-            self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+            self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_docker_status_display(self, data: Dict[str, Any]) -> None:
         if data:
@@ -412,7 +389,7 @@ class SynologySystemDashboard:
             line1 = f"Docker - {status.title()}"
             line2 = f"Containers: {running_count}/{total_count} running"
             
-            self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+            self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_surveillance_status_display(self, data: Dict[str, Any]) -> None:
         if data:
@@ -420,7 +397,7 @@ class SynologySystemDashboard:
             recording_count = data.get('recording_count', 0)
             line1 = f"Surveillance - {data.get('status', 'Unknown').title()}"
             line2 = f"Cameras: {camera_count} | Recording: {recording_count}"
-            self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+            self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_thermal_status_display(self, data: Dict[str, Any]) -> None:
         """Update thermal status display with properly formatted temperature."""
@@ -435,7 +412,7 @@ class SynologySystemDashboard:
             line1 = "Thermal Monitor"
             line2 = "Temperature sensor unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_cache_status_display(self, data: Dict[str, Any]) -> None:
         """Update SSD cache status display."""
@@ -450,8 +427,8 @@ class SynologySystemDashboard:
             line1 = "No SSD cache detected or configured"
             line2 = "SSD Cache - Disabled"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_raid_status_display(self, data: Dict[str, Any]) -> None:
         """Update RAID status display with real RAID data."""
@@ -478,7 +455,7 @@ class SynologySystemDashboard:
             line1 = "RAID Health"
             line2 = "RAID information unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_volume_status_display(self, data: Dict[str, Any]) -> None:
         """Update volume status display."""
@@ -500,8 +477,8 @@ class SynologySystemDashboard:
             line1 = "Volume information unavailable"
             line2 = "Volume Usage"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_ups_status_display(self, data: Dict[str, Any]) -> None:
         """Update UPS status display to show model and status information."""
@@ -531,8 +508,8 @@ class SynologySystemDashboard:
             line1 = "UPS Monitor"
             line2 = "UPS information unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_hardware_monitor_display(self, data: Dict[str, Any]) -> None:
         """Update hardware monitoring display with properly formatted temperatures."""
@@ -553,8 +530,8 @@ class SynologySystemDashboard:
             line1 = "Hardware data unavailable"
             line2 = "Hardware Monitor"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_drive_health_display(self, data: Dict[str, Any]) -> None:
         """Update drive health display."""
@@ -572,7 +549,7 @@ class SynologySystemDashboard:
             line1 = "Drive Health"
             line2 = "Drive health data unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE], self._entity.attributes[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
+        self._view[Attributes.MEDIA_TITLE], self._view[Attributes.MEDIA_ARTIST] = create_two_line_display(line1, line2)
 
     async def _update_power_management_display(self, data: Dict[str, Any]) -> None:
         """Update power management display with properly formatted temperature."""
@@ -598,8 +575,8 @@ class SynologySystemDashboard:
             line1 = "Power Management unavailable - NAS not connected"
             line2 = "Unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_cache_performance_display(self, data: Dict[str, Any]) -> None:
         """Update cache performance display with SSD cache data."""
@@ -620,8 +597,8 @@ class SynologySystemDashboard:
             line1 = "Cache performance unavailable - NAS not connected"
             line2 = "Unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_package_manager_display(self, data: Dict[str, Any]) -> None:
         """Update package manager display with installed package counts."""
@@ -657,8 +634,8 @@ class SynologySystemDashboard:
             line1 = "Package manager unavailable - NAS not connected"
             line2 = "Unavailable"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _update_user_sessions_display(self, data: Dict[str, Any]) -> None:
         """Update user sessions display."""
@@ -678,51 +655,11 @@ class SynologySystemDashboard:
             line1 = "Session data unavailable"
             line2 = "User Sessions"
         
-        self._entity.attributes[Attributes.MEDIA_TITLE] = line1
-        self._entity.attributes[Attributes.MEDIA_ARTIST] = line2
+        self._view[Attributes.MEDIA_TITLE] = line1
+        self._view[Attributes.MEDIA_ARTIST] = line2
 
     async def _refresh_display(self) -> None:
         """Force refresh of current display."""
         await self._update_current_data(force_refresh=True)
-        self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-
-    async def _polling_loop(self) -> None:
-        """Main polling loop for data updates - HTCP exact pattern."""
-        _LOG.info("Polling loop started.")
-        while True:
-            try:
-                await self._update_current_data()
-                self._api.configured_entities.update_attributes(self.entity_id, self._entity.attributes)
-                interval = self._config.polling_intervals.get(self._current_source.lower(), 15)
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                _LOG.info("Polling loop cancelled.")
-                break
-            except Exception as ex:
-                _LOG.error(f"Error in polling loop: {ex}")
-                await asyncio.sleep(30)
-
-    async def start(self) -> None:
-        """Start the system dashboard's polling loop."""
-        if not self._polling_task or self._polling_task.done():
-            if self._client.connected:
-                self._entity.attributes[Attributes.STATE] = States.PLAYING
-                self._polling_task = asyncio.create_task(self._polling_loop())
-
-    async def stop(self) -> None:
-        """Stop the system dashboard."""
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
-            self._polling_task = None
-
-    @property
-    def entity(self) -> MediaPlayer:
-        return self._entity
-
-    @property
-    def entity_id(self) -> str:
-        return self._entity.id
+        self._last_refresh = time.monotonic()
+        self._push()
