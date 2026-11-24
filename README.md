@@ -130,6 +130,8 @@ This integration should work with **any Synology NAS running DSM 7.x**, includin
 4. Go to **Settings** → **Integrations** → **Add Integration**
 5. Click **Upload** and select the downloaded `.tar.gz` file
 
+**Upgrading from 1.x:** upload the new file over the existing integration. Your settings and entities are kept; if the integration shows an error afterwards, run **Update** in the integration setup once.
+
 ### Option 2: Docker (Advanced Users)
 
 The integration is available as a pre-built Docker image from Docker Hub:
@@ -243,7 +245,7 @@ The remote entity provides system administration:
 
 - **Developer**: Meir Miyara
 - **Synology API**: Synology API Python Library (N4S4)
-- **Unfolded Circle**: Remote 2/3 integration framework (ucapi)
+- **Unfolded Circle**: Remote 2/3 integration framework (ucapi, ucapi-framework)
 - **Protocol**: Synology DSM API
 - **Community**: Testing and feedback from UC community
 
